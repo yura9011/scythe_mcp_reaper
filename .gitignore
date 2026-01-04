@@ -32,6 +32,3 @@ uv.lock
 # Legacy/Personal
 _legacy/
 mcp_config.json
-
-# Docs that shouldn't be in repo
-docs/
