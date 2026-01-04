@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+ENV/
+*.egg-info/
+dist/
+build/
+.uv/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test/Dev files
+test_lua.py
+uv.lock
+.hypothesis/
+.pytest_cache/
+.snapshots/
+
+# Legacy/Personal
+_legacy/
+mcp_config.json
+
+# Docs that shouldn't be in repo
+docs/
