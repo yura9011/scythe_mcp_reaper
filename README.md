@@ -15,7 +15,7 @@ AI-powered music composition and control for REAPER DAW via Model Context Protoc
 ### 1. Install Python dependencies
 
 ```bash
-cd d:/tareas/experiment_cubase
+cd /path/to/scythe_mcp_reaper
 uv sync
 ```
 
@@ -44,7 +44,7 @@ Add to your MCP client configuration (e.g., Claude Desktop, Cursor, etc.):
     "scythe": {
       "command": "uv",
       "args": ["run", "scythe-mcp"],
-      "cwd": "d:/tareas/experiment_cubase"
+      "cwd": "/path/to/scythe_mcp_reaper"
     }
   }
 }
