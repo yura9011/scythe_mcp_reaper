@@ -29,28 +29,41 @@ local function parse_json(str)
     -- Extract params
     result.params = {}
     
-    -- Special handling for "code" field (may contain escaped quotes)
+    -- Special handling for "code" field (may contain escaped quotes and newlines)
     local code_start = str:find('"code"%s*:%s*"')
     if code_start then
         local quote_pos = str:find('"', code_start + 8)
-        if quote_pos then
-            -- Find the end quote (not escaped)
-            local i = quote_pos + 1
-            local code_chars = {}
-            while i <= #str do
-                local c = str:sub(i, i)
-                if c == '\\' and str:sub(i+1, i+1) == '"' then
-                    table.insert(code_chars, '"')
-                    i = i + 2
-                elseif c == '"' then
-                    break
-                else
+        -- We need to find the specific closing quote that isn't escaped
+        -- But first, let's just parse aggressively from the start position
+        local content_start = str:find('"', code_start) + 1
+        
+        local i = content_start
+        local code_chars = {}
+        while i <= #str do
+            local c = str:sub(i, i)
+            if c == '\\' then
+                local next_c = str:sub(i+1, i+1)
+                if next_c == '"' then table.insert(code_chars, '"')
+                elseif next_c == '\\' then table.insert(code_chars, '\\')
+                elseif next_c == '/' then table.insert(code_chars, '/')
+                elseif next_c == 'b' then table.insert(code_chars, '\b')
+                elseif next_c == 'f' then table.insert(code_chars, '\f')
+                elseif next_c == 'n' then table.insert(code_chars, '\n')
+                elseif next_c == 'r' then table.insert(code_chars, '\r')
+                elseif next_c == 't' then table.insert(code_chars, '\t')
+                else 
                     table.insert(code_chars, c)
-                    i = i + 1
+                    table.insert(code_chars, next_c)
                 end
+                i = i + 2
+            elseif c == '"' then
+                break
+            else
+                table.insert(code_chars, c)
+                i = i + 1
             end
-            result.params.code = table.concat(code_chars)
         end
+        result.params.code = table.concat(code_chars)
     end
     
     -- Extract other simple params
@@ -81,6 +94,11 @@ local function write_response(data)
         if data.error then
             f:write(', "error": "' .. data.error .. '"')
         end
+        if data.result then
+            -- Sanitize result for JSON string
+            local res_str = tostring(data.result):gsub('"', '\\"'):gsub('\n', '\\n')
+            f:write(', "result": "' .. res_str .. '"')
+        end
         f:write('}')
         f:close()
     end
@@ -103,18 +121,34 @@ function handlers.name_selected_track(params)
 end
 
 function handlers.insert_midi_item(params)
-    local track = reaper.GetTrack(0, params.track_index or 0)
+    local track_idx = params.track_index or 0
+    local track = reaper.GetTrack(0, track_idx)
     if not track then
-        return {success = false, error = "Track not found"}
+        return {success = false, error = "Track not found at index " .. tostring(track_idx)}
     end
     
     local tempo = reaper.Master_GetTempo()
     local pos_sec = (params.position or 0) * (60 / tempo)
     local len_sec = (params.length or 4) * (60 / tempo)
     
+    -- Create item
     local item = reaper.CreateNewMIDIItemInProj(track, pos_sec, pos_sec + len_sec, false)
+    
     if item then
-        return {success = true, message = "MIDI item created"}
+        local take = reaper.GetActiveTake(item)
+        if take then
+            reaper.GetSetMediaItemTakeInfo_String(take, "P_NAME", "Generated MIDI", true)
+        end
+        reaper.UpdateArrange()
+        reaper.TrackList_AdjustWindows(false)
+        
+        local item_count = reaper.CountTrackMediaItems(track)
+        
+        return {
+            success = true, 
+            message = "MIDI item created", 
+            result = "Items on track: " .. tostring(item_count)
+        }
     end
     return {success = false, error = "Failed to create item"}
 end
@@ -169,6 +203,23 @@ function handlers.execute_lua(params)
     return {success = true, message = "Lua code executed successfully"}
 end
 
+function handlers.run_lua_file(params)
+    local path = params.path
+    if not path then
+        return {success = false, error = "No path provided"}
+    end
+    
+    local f = io.open(path, "r")
+    if not f then
+        return {success = false, error = "File not found: " .. path}
+    end
+    local code = f:read("*all")
+    f:close()
+    
+    -- Reuse execute_lua logic
+    return handlers.execute_lua({code = code})
+end
+
 -- Last processed timestamp to avoid re-processing
 local last_timestamp = 0
 
@@ -200,9 +251,9 @@ local function process_commands()
             
             local handler = handlers[cmd.command]
             if handler then
-                reaper.Undo_BeginBlock()
+                -- reaper.Undo_BeginBlock()
                 local result = handler(cmd.params or {})
-                reaper.Undo_EndBlock("Scythe: " .. cmd.command, -1)
+                -- reaper.Undo_EndBlock("Scythe: " .. cmd.command, -1)
                 write_response(result)
             else
                 write_response({success = false, error = "Unknown command: " .. cmd.command})

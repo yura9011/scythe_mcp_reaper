@@ -7,6 +7,7 @@ Generate melodies based on scales, chords, and stylistic patterns.
 from typing import List, Dict, Optional, Tuple
 from dataclasses import dataclass
 import random
+import math
 
 from ..music_theory.scales import Scale
 from ..music_theory.chords import Chord
@@ -129,14 +130,42 @@ def _generate_rhythm_pattern(
             
             pos += random.choice([0.5, 1.0, 1.5])
             
+    elif style == "lyrical":
+        # Smooth, on-beat, longer notes for ballads
+        pos = 0.0
+        while pos < beats:
+            # Mostly quarter and half notes, occasional eighths
+            dur = random.choice([1.0, 1.0, 1.5, 2.0, 3.0, 0.5])
+            
+            # Snap position to grid (nearest 0.5) to fix drift
+            pos = math.ceil(pos * 2) / 2
+            
+            if pos + dur <= beats:
+                positions.append((pos, dur * 0.95)) # Slight separation
+            
+            # Less is More: Add gaps based on density
+            # Density 1.0 = no gaps. Density 0.3 = frequent gaps.
+            gap = 0
+            if random.random() > density:
+                 # Add a rest (1 to 2 beats)
+                 gap = random.choice([1.0, 2.0, 3.0])
+            
+            pos += dur + gap
+            
     else:  # varied
         pos = 0.0
         while pos < beats:
             dur = random.choice([0.25, 0.5, 0.75, 1.0, 1.5, 2.0])
-            dur *= random.uniform(0.9, 1.0)  # Slight variation
+            # REMOVED: dur *= random.uniform(0.9, 1.0) - This caused accumulated drift!
+            
+            # Start position must be quantized? 
+            # The current logic just adds duration. 
+            # Ideally we pick a start time on the grid.
             
             if pos + dur <= beats:
-                positions.append((pos, dur))
+                # We can shorten the *played* duration (gate) without affecting the *grid* position for the next note
+                write_dur = dur * random.uniform(0.9, 1.0) # Humanize length only
+                positions.append((pos, write_dur))
             
             # Gap between notes
             gap = random.choice([0, 0, 0.25, 0.5]) if density > 0.5 else random.choice([0.25, 0.5, 1.0])

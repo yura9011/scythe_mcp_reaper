@@ -67,6 +67,7 @@ class ReaperBridge:
     osc_port: int = None  # Set via REAPER_OSC_PORT env or default to 8000
     command_file: Path = None
     response_file: Path = None
+    temp_dir: Path = None
     
     _osc_client: Any = None
     
@@ -78,11 +79,11 @@ class ReaperBridge:
             self.osc_port = int(os.environ.get("REAPER_OSC_PORT", "8000"))
         
         # Use temp directory for command files
-        temp_dir = Path(tempfile.gettempdir()) / "scythe_mcp"
-        temp_dir.mkdir(exist_ok=True)
+        self.temp_dir = Path(tempfile.gettempdir()) / "scythe_mcp"
+        self.temp_dir.mkdir(exist_ok=True)
         
-        self.command_file = temp_dir / "command.json"
-        self.response_file = temp_dir / "response.json"
+        self.command_file = self.temp_dir / "command.json"
+        self.response_file = self.temp_dir / "response.json"
         
         # Initialize OSC client
         if HAS_OSC:
@@ -218,49 +219,155 @@ class ReaperBridge:
         return None
     
     def create_track(self, name: str = "New Track") -> Dict[str, Any]:
-        """Create a new track via action then file command for naming."""
-        # First trigger insert track action
-        self.trigger_action(40001)
+        """Create a new track via Lua for strict synchronous execution."""
+        # We use a Lua script to insert the track at the end and return its index
+        lua_code = f"""
+        local idx = reaper.CountTracks(0)
+        -- return "DEBUG: Count " .. tostring(idx)
+        reaper.InsertTrackAtIndex(idx, true)
+        local track = reaper.GetTrack(0, idx)
+        if track then
+            reaper.GetSetMediaTrackInfo_String(track, "P_NAME", "{name}", true)
+            reaper.TrackList_AdjustWindows(false)
+            reaper.UpdateArrange()
+            return idx
+        end
+        return "ERROR: Track not found after insert at " .. tostring(idx)
+        """
+        # We use execute_lua which waits for response
+        result = self.execute_lua(lua_code)
         
-        # Then send naming command via file
-        self._write_command("name_selected_track", {"name": name})
+        # Check result
+        if result.get("success"):
+            val = result.get("result", "ERROR")
+            if "ERROR" not in str(val) and "DEBUG" not in str(val):
+                try:
+                    idx = int(float(str(val)))
+                    if idx >= 0:
+                        return {
+                            "success": True, 
+                            "message": f"Created track: {name}", 
+                            "track_index": idx
+                        }
+                except ValueError:
+                    pass
         
-        return {"success": True, "message": f"Created track: {name}"}
+        return {"success": False, "message": f"Failed to create track via Lua. Res: {result}"}
     
     def insert_midi_item(self, track_index: int, position: float, length: float) -> Dict[str, Any]:
-        """Insert MIDI item via file command."""
-        self._write_command("insert_midi_item", {
-            "track_index": track_index,
-            "position": position,
-            "length": length
-        })
+        """Insert MIDI item via direct Lua execution for consistency."""
+        lua_code = f"""
+        local track = reaper.GetTrack(0, {track_index})
+        if not track then return "ERROR: Track not found" end
         
-        response = self._read_response()
-        if response:
-            return response
-        return {"success": True, "message": "MIDI item command sent"}
+        local tempo = reaper.Master_GetTempo()
+        local pos_sec = {position} * (60 / tempo)
+        local len_sec = {length} * (60 / tempo)
+        
+        local item = reaper.CreateNewMIDIItemInProj(track, pos_sec, pos_sec + len_sec, false)
+        if item then
+            local take = reaper.GetActiveTake(item)
+            if take then
+                reaper.GetSetMediaItemTakeInfo_String(take, "P_NAME", "Generated MIDI", true)
+            end
+            reaper.UpdateArrange()
+            reaper.TrackList_AdjustWindows(false)
+            return "Success: Item Created on Track " .. {track_index}
+        end
+        return "ERROR: Failed to create item"
+        """
+        
+        result = self.execute_lua(lua_code)
+        
+        if result.get("success"):
+             # Map string success to consistent response
+             return result
+        return {"success": False, "message": f"Failed to insert item. Res: {result}"}
     
     def add_notes(self, track_index: int, item_index: int, notes: List[Dict]) -> Dict[str, Any]:
-        """Add MIDI notes via file command."""
-        self._write_command("add_notes", {
-            "track_index": track_index,
-            "item_index": item_index,
-            "notes": notes
-        })
+        """Add MIDI notes via execute_lua to bypass complex JSON parsing."""
         
-        response = self._read_response()
-        if response:
-            return response
-        return {"success": True, "message": "Notes command sent"}
+        # Construct Lua table of notes
+        # Each note: {pitch, start, duration, velocity}
+        # We'll generate a Lua script that iterates this
+        
+        lua_notes = []
+        for n in notes:
+            # pitch, start(beats), duration(beats), velocity
+            pitch = int(n.get("pitch", 60))
+            start = float(n.get("start", 0.0))
+            dur = float(n.get("duration", 1.0))
+            vel = int(n.get("velocity", 100))
+            lua_notes.append(f"{{p={pitch},s={start},d={dur},v={vel}}}")
+        
+        notes_str = "{" + ",".join(lua_notes) + "}"
+        
+        lua_code = f"""
+        local log = ""
+        local function debug(msg) log = log .. msg .. "\\n" end
+        
+        debug("Start add_notes for Track " .. {track_index} .. " Item " .. {item_index})
+        local track = reaper.GetTrack(0, {track_index})
+        if track then
+            debug("Track found")
+            local item = reaper.GetTrackMediaItem(track, {item_index})
+            if item then
+                debug("Item found")
+                local take = reaper.GetActiveTake(item)
+                if take then
+                    debug("Take found")
+                    local ppq = 960 -- Standard resolution
+                    local notes = {notes_str}
+                    debug("Processing " .. #notes .. " notes")
+                    
+                    local count = 0
+                    for i, note in ipairs(notes) do
+                        local start_ppq = math.floor(note.s * ppq)
+                        local end_ppq = math.floor((note.s + note.d) * ppq)
+                        reaper.MIDI_InsertNote(take, false, false, start_ppq, end_ppq, 0, note.p, note.v, true)
+                        count = count + 1
+                    end
+                    debug("Inserted " .. count .. " notes")
+                    
+                    reaper.MIDI_Sort(take)
+                    reaper.UpdateArrange()
+                    return "Success: " .. log
+                else
+                    return "ERROR: No active take on item"
+                end
+            else
+                local cnt = reaper.CountTrackMediaItems(track)
+                return "ERROR: Item " .. {item_index} .. " not found. Track has " .. cnt .. " items."
+            end
+        else
+            return "ERROR: Track " .. {track_index} .. " not found"
+        end
+        """
+        
+        return self.execute_lua(lua_code)
     
     def execute_lua(self, code: str) -> Dict[str, Any]:
-        """Execute arbitrary Lua code in REAPER."""
-        self._write_command("execute_lua", {"code": code})
+        """Execute Lua code in REAPER via file transfer (robust)."""
+        # Write code to a temp file
+        import uuid
+        code_filename = f"lua_{uuid.uuid4().hex}.lua"
+        code_path = self.temp_dir / code_filename
+        code_path.write_text(code, encoding="utf-8")
+        
+        # Send path to REAPER
+        self._write_command("run_lua_file", {"path": str(code_path)})
         
         response = self._read_response(timeout=5.0)
+        
+        # Cleanup
+        try:
+            code_path.unlink()
+        except:
+            pass
+            
         if response:
             return response
-        return {"success": True, "message": "Lua code sent for execution"}
+        return {"success": True, "message": "Lua file execution sent"}
 
 
 # Global instance

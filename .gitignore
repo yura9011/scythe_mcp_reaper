@@ -23,7 +23,7 @@ build/
 Thumbs.db
 
 # Test/Dev files
-test_lua.py
+
 uv.lock
 .hypothesis/
 .pytest_cache/

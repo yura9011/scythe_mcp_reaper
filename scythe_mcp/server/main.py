@@ -313,9 +313,230 @@ def trigger_action(ctx: Context, action_name: str) -> str:
     return f"Error: Unknown action '{action_name}'"
 
 
+
 # =============================================================================
+# GENERATOR TOOLS
+# =============================================================================
+
+from ..generators.drums import generate_drum_pattern
+from ..generators.basslines import generate_bassline
+from ..generators.melodies import generate_melody
+from ..music_theory.chords import parse_chord
+from ..music_theory.scales import Scale
+
+@mcp.tool()
+def add_drum_track(
+    ctx: Context,
+    genre: str = "electronic",
+    bars: int = 4,
+    variation: str = "basic"
+) -> str:
+    """
+    Generate and add a drum track.
+    
+    Args:
+        genre: Genre (electronic, hiphop, rock, trap, lofi)
+        bars: Number of bars
+        variation: Pattern variation
+    """
+    bridge = get_bridge()
+    
+    # Create track
+    track_name = f"{genre.capitalize()} Drums"
+    res = bridge.create_track(track_name)
+    # Give it a moment to exist in REAPER logic (approx)
+    import time
+    time.sleep(0.3)
+    
+    if not res.get("success") or "track_index" not in res:
+         return f"Error: Failed to create track. {res.get('message')}"
+    
+    track_index = res["track_index"]
+
+    # Generate patterns
+    pattern = generate_drum_pattern(genre=genre, bars=bars, variation=variation)
+    notes = pattern.to_midi_notes()
+
+    # Insert MIDI item
+    bridge.insert_midi_item(track_index, position=0, length=bars * 4) # Assuming 4/4
+    
+    # Add Notes
+    # bridge.add_notes now handles logic internally via execute_lua
+    bridge.add_notes(track_index, 0, notes) # item_index 0 (newest/first)
+    
+    return f"Created drum track '{track_name}' ID:{track_index+1} with {len(notes)} notes."
+
+# Forgetting complexities, let's just expose the RAW generators which return JSON,
+# and let the user (or LLM) use `create_midi_item` + `add_notes` manually?
+# NO, the user wants "tools" to do it.
+# Let's implement robust Logic in the tool.
+
+@mcp.tool()
+def add_bass_track(
+    ctx: Context,
+    progression: List[str],
+    style: str = "root_fifth",
+    bars_per_chord: int = 4
+) -> str:
+    """
+    Generate and add a bass track provided a chord progression.
+    
+    Args:
+        progression: List of chords ["Cm7", "Fm7"]
+        style: Bass style (root, root_fifth, walking, synth, 808)
+    """
+    bridge = get_bridge()
+    track_name = f"Bass ({style})"
+    res = bridge.create_track(track_name)
+    import time
+    time.sleep(0.3)
+    
+    if not res.get("success") or "track_index" not in res:
+         return f"Error: Failed to create track. {res.get('message')}"
+    track_index = res["track_index"]
+    
+    chords = [parse_chord(name) for name in progression]
+    bass = generate_bassline(chords, style=style, beats_per_chord=float(bars_per_chord))
+    notes = bass.to_dict_list()
+    
+    bridge.insert_midi_item(track_index, 0, len(chords) * bars_per_chord)
+    bridge.add_notes(track_index, 0, notes)
+    
+    return f"Created bass track with {len(notes)} notes."
+
+@mcp.tool()
+def add_melody_track(
+    ctx: Context,
+    key: str = "C",
+    scale_type: str = "minor",
+    style: str = "varied",
+    bars: int = 4
+) -> str:
+    """
+    Generate and add a melody track.
+    
+    Args:
+        key: Key (C, D#, etc)
+        scale_type: major, minor, dorian, etc.
+        style: varied, straight, syncopated
+    """
+    bridge = get_bridge()
+    track_name = f"Melody ({key} {scale_type})"
+    res = bridge.create_track(track_name)
+    import time
+    time.sleep(0.3)
+    
+    if not res.get("success") or "track_index" not in res:
+         return f"Error: Failed to create track. {res.get('message')}"
+    track_index = res["track_index"]
+    
+    scale = Scale(key, scale_type)
+    melody = generate_melody(scale=scale, style=style, bars=bars)
+    notes = melody.to_dict_list()
+    
+    bridge.insert_midi_item(track_index, 0, bars * 4)
+    bridge.add_notes(track_index, 0, notes)
+    
+    return f"Created melody track with {len(notes)} notes."
+
+@mcp.tool()
+def create_song_sketch(
+    ctx: Context,
+    genre: str = "electronic",
+    key: str = "C",
+    scale_type: str = "minor",
+    bars: int = 4,
+    tempo: int = 120
+) -> str:
+    """
+    Generate a full song sketch (Drums, Bass, Harmony, Melody).
+    
+    Args:
+        genre: Musical genre (electronic, trap, lo-fi, etc)
+        key: Root key
+        scale_type: Scale type (major, minor)
+        bars: Length in bars
+        tempo: Project tempo
+    """
+    bridge = get_bridge()
+    bridge.set_tempo(tempo)
+    
+    # 1. Progression
+    from ..music_theory.progressions import get_progression
+    # Map scale_type to mode (major/minor)
+    mode = "minor" if "minor" in scale_type else "major"
+    prog_obj = get_progression(key=key, genre=genre, mode=mode)
+    prog_chords = prog_obj.to_chords()
+    prog_names = [f"{c.root}{c.chord_type}" for c in prog_chords] # Construct chord names manually or use str(c) if available
+    
+    results = []
+    
+    # 2. Drums
+    results.append(add_drum_track(ctx, genre=genre, bars=bars))
+    
+    # 3. Bass
+    # Map genre to bass style
+    bass_style = "root_fifth"
+    if genre in ["trap", "hiphop"]: bass_style = "808"
+    elif genre == "electronic": bass_style = "synth"
+    
+    results.append(add_bass_track(ctx, progression=prog_names, style=bass_style, bars_per_chord=1)) # Prog usually 1 chord/bar?
+    # generate_progression returns list of Chords. Length=bars implies 1 chord per bar.
+    
+    # 4. Melody
+    results.append(add_melody_track(ctx, key=key, scale_type=scale_type, style="syncopated", bars=bars))
+    
+    return "Song Sketch Created:\n- " + "\n- ".join(results)
+
+@mcp.tool()
+def generate_drums_json(
+    ctx: Context,
+    genre: str = "electronic",
+    bars: int = 4
+) -> str:
+    """
+    Generate drum pattern data (JSON) to be used with add_notes.
+    Returns the note list directly.
+    """
+    pattern = generate_drum_pattern(genre=genre, bars=bars)
+    import json
+    return json.dumps(pattern.to_midi_notes())
+
+@mcp.tool()
+def generate_bass_json(
+    ctx: Context,
+    progression: List[str],
+    style: str = "root_fifth",
+    bars_per_chord: int = 4
+) -> str:
+    """
+    Generate bassline data (JSON) from chord progression.
+    
+    Args:
+        progression: List of chord names ["Cmaj7", "Am7"]
+        style: Bass style
+    """
+    chords = [parse_chord(name) for name in progression]
+    bass = generate_bassline(chords, style=style, beats_per_chord=float(bars_per_chord))
+    import json
+    return json.dumps(bass.to_dict_list())
+
+@mcp.tool()
+def generate_melody_json(
+    ctx: Context,
+    key: str = "C",
+    scale_type: str = "minor",
+    style: str = "varied"
+) -> str:
+    """
+    Generate melody data (JSON).
+    """
+    scale = Scale(key, scale_type)
+    melody = generate_melody(scale=scale, style=style)
+    import json
+    return json.dumps(melody.to_dict_list())
+    
 # ENTRY POINT
-# =============================================================================
 
 def main():
     """Run the MCP server."""
